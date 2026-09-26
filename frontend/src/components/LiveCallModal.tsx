@@ -149,6 +149,11 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
       recognition.onerror = (err: any) => {
         console.error('Speech recognition error:', err);
         setIsMicActive(false);
+        if (err.error === 'no-speech') {
+          console.log('No speech was detected. Click microphone to speak or type in the text box below.');
+        } else if (err.error === 'not-allowed') {
+          alert('Microphone access was denied. Please allow microphone permissions in your browser settings or type customer responses in the text box!');
+        }
       };
 
       recognition.onend = () => {
