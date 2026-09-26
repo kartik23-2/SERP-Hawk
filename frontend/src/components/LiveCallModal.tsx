@@ -53,14 +53,16 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Automatically start microphone listening (Hands-free voice mode)
+  const shouldListenRef = useRef(false);
+
+  // Continuous hands-free microphone listening loop
   const startListeningAutomatically = useCallback(() => {
-    if (!isCallActiveRef.current || !autoMicLoopRef.current) return;
+    if (!isCallActiveRef.current) return;
+    shouldListenRef.current = true;
 
     const isSpeechAvailable = ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
     if (!isSpeechAvailable) return;
 
-    // Stop previous instance if active
     if (recognitionRef.current) {
       try { recognitionRef.current.stop(); } catch (e) {}
     }
@@ -68,8 +70,8 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     try {
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
       const recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = false;
+      recognition.continuous = true;
+      recognition.interimResults = true;
       recognition.lang = 'en-IN';
 
       recognition.onstart = () => {
@@ -79,32 +81,39 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
       };
 
       recognition.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript;
-        setIsMicActive(false);
-        if (transcript && transcript.trim()) {
-          sendCustomerMessage(transcript);
+        let finalTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            finalTranscript += event.results[i][0].transcript;
+          }
+        }
+        if (finalTranscript && finalTranscript.trim()) {
+          shouldListenRef.current = false;
+          setIsMicActive(false);
+          try { recognition.stop(); } catch (e) {}
+          sendCustomerMessage(finalTranscript.trim());
         }
       };
 
       recognition.onerror = (err: any) => {
-        setIsMicActive(false);
         const errType = err.error || '';
-        if (errType === 'no-speech' || errType === 'aborted') {
-          // Restart listening automatically if call is still active & in auto mode
-          if (isCallActiveRef.current && autoMicLoopRef.current && status !== 'Completed') {
-            setTimeout(() => {
-              if (isCallActiveRef.current && autoMicLoopRef.current) {
-                startListeningAutomatically();
-              }
-            }, 600);
-          }
-        } else if (errType === 'not-allowed' || errType === 'service-not-allowed') {
-          setMicError('Microphone permission blocked. Please allow mic access in browser or use text input below.');
+        if (errType === 'not-allowed' || errType === 'service-not-allowed') {
+          shouldListenRef.current = false;
+          setIsMicActive(false);
+          setMicError('Microphone permission blocked. Please allow mic access in browser settings or use text input below.');
         }
       };
 
       recognition.onend = () => {
         setIsMicActive(false);
+        // If mic turned off naturally (silence/timeout) but call is still active & listening expected, auto-restart mic!
+        if (shouldListenRef.current && isCallActiveRef.current) {
+          setTimeout(() => {
+            if (shouldListenRef.current && isCallActiveRef.current) {
+              try { recognition.start(); } catch (e) {}
+            }
+          }, 300);
+        }
       };
 
       recognitionRef.current = recognition;
@@ -121,11 +130,9 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     setStatus('Listening');
 
     // Automatically shift to listening to customer's voice!
-    if (autoMicLoopRef.current) {
-      setTimeout(() => {
-        startListeningAutomatically();
-      }, 400);
-    }
+    setTimeout(() => {
+      startListeningAutomatically();
+    }, 400);
   }, [startListeningAutomatically]);
 
   // Dual Voice Playback Engine (Edge Neural Base64 Audio + Browser SpeechSynthesis)
@@ -264,6 +271,7 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
   // Manual Mic Toggle
   const toggleMic = () => {
     if (isMicActive) {
+      shouldListenRef.current = false;
       if (recognitionRef.current) {
         try { recognitionRef.current.stop(); } catch (e) {}
       }
@@ -312,6 +320,7 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
   // Close call modal & return to Dashboard
   const handleEndCall = () => {
     isCallActiveRef.current = false;
+    shouldListenRef.current = false;
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({ event: 'end_call' }));
       socketRef.current.close();
