@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Phone, PhoneOff, Mic, MicOff, Send, Bot, User, Sparkles, CheckCircle2, HelpCircle, Volume2, AlertCircle, MessageSquare } from 'lucide-react';
+import { Phone, PhoneOff, Mic, MicOff, Send, Bot, User, Sparkles, CheckCircle2, HelpCircle, Volume2, AlertCircle, MessageSquare, X, ArrowLeft } from 'lucide-react';
 import { Customer } from '@/types';
 
 interface LiveCallModalProps {
@@ -45,6 +45,56 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Voice playback with dual fallback (Edge Neural Base64 Audio + Browser SpeechSynthesis)
+  const speakVoice = (text: string, audioBase64?: string | null) => {
+    if (audioBase64) {
+      try {
+        if (audioRef.current) {
+          audioRef.current.pause();
+        }
+        const audio = new Audio(audioBase64);
+        audioRef.current = audio;
+        const playPromise = audio.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              audio.onended = () => {
+                setStatus('Listening');
+              };
+            })
+            .catch((err) => {
+              console.log('Base64 audio autoplay blocked, using Web SpeechSynthesis fallback:', err);
+              speakBrowserSpeech(text);
+            });
+          return;
+        }
+      } catch (e) {
+        console.log('Error creating Audio element, using fallback:', e);
+      }
+    }
+    speakBrowserSpeech(text);
+  };
+
+  const speakBrowserSpeech = (text: string) => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = 'en-IN';
+        utterance.rate = 1.0;
+        utterance.onend = () => {
+          setStatus('Listening');
+        };
+        window.speechSynthesis.speak(utterance);
+      } catch (e) {
+        console.error('Speech synthesis error:', e);
+        setTimeout(() => setStatus('Listening'), 1500);
+      }
+    } else {
+      setTimeout(() => setStatus('Listening'), 1500);
+    }
+  };
+
   // Connect WebSocket when modal opens
   useEffect(() => {
     if (!isOpen || !callId) return;
@@ -78,22 +128,8 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
         if (data.collected_slots) setCollectedSlots(data.collected_slots);
         if (data.missing_slots) setMissingSlots(data.missing_slots);
 
-        // Play AI Neural Voice Audio
-        if (data.audio_base64) {
-          if (audioRef.current) {
-            audioRef.current.pause();
-          }
-          const audio = new Audio(data.audio_base64);
-          audioRef.current = audio;
-          audio.play().catch((err) => console.log('Audio autoplay prevented or error:', err));
-          audio.onended = () => {
-            setStatus(data.is_finished ? 'Completed' : 'Listening');
-          };
-        } else {
-          setTimeout(() => {
-            setStatus(data.is_finished ? 'Completed' : 'Listening');
-          }, 1500);
-        }
+        // Play Voice Response out loud!
+        speakVoice(data.text, data.audio_base64);
 
         if (data.is_finished) {
           setStatus('Completed');
@@ -117,6 +153,9 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
       if (audioRef.current) {
         audioRef.current.pause();
       }
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
       if (recognitionRef.current) {
         try { recognitionRef.current.stop(); } catch (e) {}
       }
@@ -129,7 +168,7 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
 
     const isSpeechAvailable = ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
     if (!isSpeechAvailable) {
-      setMicError('Speech recognition is not supported in this browser. Please type or click sample prompts below!');
+      setMicError('Microphone Speech API is not supported in this browser. Please use text input or click quick prompts below!');
       return;
     }
 
@@ -166,12 +205,11 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
         setIsMicActive(false);
         const errType = err.error || '';
         if (errType === 'not-allowed' || errType === 'service-not-allowed') {
-          setMicError('Microphone permission blocked. Please allow mic access or use text input / sample prompts below.');
+          setMicError('Microphone access blocked by browser settings. Type or click quick prompts below.');
         } else if (errType === 'no-speech' || errType === 'aborted') {
-          // Benign error: user didn't speak before timeout
-          console.log('Speech recognition timed out or stopped.');
+          console.log('Speech recognition timed out.');
         } else {
-          setMicError(`Speech input note: ${errType || 'Interrupted'}. You can type or click quick responses below.`);
+          setMicError(`Mic note: ${errType}. Use text input or 1-click prompts below.`);
         }
       };
 
@@ -184,7 +222,7 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     } catch (e: any) {
       console.warn('Recognition start exception:', e);
       setIsMicActive(false);
-      setMicError('Could not start microphone. You can type customer responses directly below.');
+      setMicError('Could not start microphone. Use text input or quick response buttons below.');
     }
   };
 
@@ -192,7 +230,7 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     const text = textToSend || inputText;
     if (!text.trim() || !socketRef.current) return;
 
-    // Append to messages
+    // Append customer message to chat
     setMessages((prev) => [
       ...prev,
       {
@@ -202,7 +240,12 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
       },
     ]);
 
-    // Send payload over WebSocket
+    // Stop ongoing speech synthesis
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+
+    // Send text turn over WebSocket to FastAPI backend
     socketRef.current.send(
       JSON.stringify({
         event: 'user_speak',
@@ -215,18 +258,23 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     setMicError(null);
   };
 
+  // Close Call and return to Dashboard immediately
   const handleEndCall = () => {
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({ event: 'end_call' }));
       socketRef.current.close();
     }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
     setStatus('Completed');
     if (onCallEnded) onCallEnded();
+    onClose(); // Instantly close modal and return to dashboard
   };
 
   if (!isOpen || !customer) return null;
 
-  // Sample quick customer responses for easy 1-click testing
+  // Sample quick customer responses for 1-click voice interaction
   const quickPrompts = [
     `I am looking for a 500 LPH RO system for my hotel in Bangalore.`,
     `Our budget is around ₹1,00,000 and installation is needed within 1 month.`,
@@ -235,17 +283,26 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-lg animate-fadeIn">
-      <div className="relative w-full max-w-4xl bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/85 backdrop-blur-lg animate-fadeIn">
+      <div className="relative w-full max-w-4xl bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
         
         {/* Top Header Bar */}
-        <div className="px-6 py-4 bg-slate-950/80 border-b border-slate-800 flex items-center justify-between">
+        <div className="px-5 py-3.5 bg-slate-950/90 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center space-x-3">
+            <button
+              onClick={handleEndCall}
+              className="p-2 text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-800 rounded-xl transition-colors flex items-center gap-1 text-xs font-semibold"
+              title="Back to Dashboard"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span className="hidden sm:inline">Dashboard</span>
+            </button>
+
             <div className="relative">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-500 to-indigo-600 flex items-center justify-center text-white font-bold shadow-md">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-cyan-500 to-indigo-600 flex items-center justify-center text-white font-bold text-sm shadow-md">
                 {customer.name.charAt(0)}
               </div>
-              <span className={`absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full border-2 border-slate-900 ${
+              <span className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-slate-900 ${
                 status === 'In Call' || status === 'AI Speaking' || status === 'Listening'
                   ? 'bg-emerald-500 animate-ping'
                   : status === 'Completed'
@@ -255,18 +312,18 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <h3 className="text-base font-bold text-white">{customer.name}</h3>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">
+                <h3 className="text-sm font-bold text-white">{customer.name}</h3>
+                <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">
                   {customer.phone_number}
                 </span>
               </div>
-              <p className="text-xs text-slate-400">
-                Product: <span className="text-cyan-400 font-medium">{customer.product}</span> ({customer.purpose})
+              <p className="text-[11px] text-slate-400">
+                Product: <span className="text-cyan-400 font-medium">{customer.product}</span>
               </p>
             </div>
           </div>
 
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-2 sm:space-x-3">
             {/* Status Pill */}
             <div className={`px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5 ${
               status === 'AI Speaking'
@@ -281,18 +338,28 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
               <span>{status}</span>
             </div>
 
+            {/* End Call Button */}
             <button
               onClick={handleEndCall}
-              className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-lg shadow-rose-600/30 transition-all active:scale-95"
+              className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold flex items-center gap-1 shadow-lg shadow-rose-600/30 transition-all active:scale-95"
             >
-              <PhoneOff className="w-4 h-4" />
+              <PhoneOff className="w-3.5 h-3.5" />
               <span>End Call</span>
+            </button>
+
+            {/* Close X Button */}
+            <button
+              onClick={handleEndCall}
+              className="p-1.5 text-slate-400 hover:text-white bg-slate-800/60 rounded-full hover:bg-slate-800 transition-colors"
+              title="Close Modal"
+            >
+              <X className="w-5 h-5" />
             </button>
           </div>
         </div>
 
         {/* Dynamic Waveform Visualizer */}
-        <div className="h-12 bg-slate-950/90 border-b border-slate-800/80 flex items-center justify-center px-6 gap-1">
+        <div className="h-10 bg-slate-950/90 border-b border-slate-800/80 flex items-center justify-center px-6 gap-1">
           {Array.from({ length: 32 }).map((_, i) => (
             <div
               key={i}
@@ -306,8 +373,8 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
               style={{
                 height:
                   status === 'AI Speaking' || status === 'Listening'
-                    ? `${Math.max(12, Math.sin(i * 0.4 + Date.now() * 0.005) * 32 + 20)}px`
-                    : '6px',
+                    ? `${Math.max(10, Math.sin(i * 0.4 + Date.now() * 0.005) * 26 + 16)}px`
+                    : '5px',
               }}
             />
           ))}
@@ -354,10 +421,10 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
             </div>
 
             <div className="pt-3 border-t border-slate-800/80">
-              <h5 className="text-[11px] font-semibold text-slate-400 mb-1">Call Mode Info</h5>
+              <h5 className="text-[11px] font-semibold text-slate-400 mb-1">Call Engine</h5>
               <p className="text-[11px] text-slate-400 leading-relaxed bg-slate-900/90 p-2.5 rounded-xl border border-slate-800">
                 Mode: <span className="text-cyan-400 font-semibold uppercase">{callMode}</span>. 
-                Using Microsoft Edge Neural Voice (<span className="text-indigo-400">en-IN-Prabhat</span>) and Google Gemini 2.5 Flash for agentic reasoning.
+                Using Microsoft Edge Neural Voice (<span className="text-indigo-400">en-IN-Prabhat</span>) + Web Speech fallback & Google Gemini 2.5 Flash.
               </p>
             </div>
           </div>
@@ -414,7 +481,7 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
             {/* Quick Customer Voice Response Prompts */}
             <div className="px-3 py-2 bg-slate-950/90 border-t border-slate-800/80">
               <p className="text-[10px] font-semibold text-slate-400 mb-1.5 flex items-center gap-1">
-                <MessageSquare className="w-3 h-3 text-cyan-400" /> Quick Customer Responses (1-Click Voice Trigger):
+                <MessageSquare className="w-3 h-3 text-cyan-400" /> Quick Responses (1-Click Voice & AI Answer Trigger):
               </p>
               <div className="flex flex-wrap gap-1.5">
                 {quickPrompts.map((prompt, pIdx) => (
