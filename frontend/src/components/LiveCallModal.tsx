@@ -53,12 +53,9 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const shouldListenRef = useRef(false);
-
-  // Continuous hands-free microphone listening loop
+  // Speech recognition starter
   const startListeningAutomatically = useCallback(() => {
     if (!isCallActiveRef.current) return;
-    shouldListenRef.current = true;
 
     const isSpeechAvailable = ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
     if (!isSpeechAvailable) return;
@@ -88,7 +85,6 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
           }
         }
         if (finalTranscript && finalTranscript.trim()) {
-          shouldListenRef.current = false;
           setIsMicActive(false);
           try { recognition.stop(); } catch (e) {}
           sendCustomerMessage(finalTranscript.trim());
@@ -96,30 +92,21 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
       };
 
       recognition.onerror = (err: any) => {
+        setIsMicActive(false);
         const errType = err.error || '';
         if (errType === 'not-allowed' || errType === 'service-not-allowed') {
-          shouldListenRef.current = false;
-          setIsMicActive(false);
           setMicError('Microphone permission blocked. Please allow mic access in browser settings or use text input below.');
         }
       };
 
       recognition.onend = () => {
         setIsMicActive(false);
-        // If mic turned off naturally (silence/timeout) but call is still active & listening expected, auto-restart mic!
-        if (shouldListenRef.current && isCallActiveRef.current) {
-          setTimeout(() => {
-            if (shouldListenRef.current && isCallActiveRef.current) {
-              try { recognition.start(); } catch (e) {}
-            }
-          }, 300);
-        }
       };
 
       recognitionRef.current = recognition;
       recognition.start();
     } catch (e: any) {
-      console.warn('Auto recognition start exception:', e);
+      console.warn('Recognition start exception:', e);
       setIsMicActive(false);
     }
   }, []);
@@ -129,10 +116,10 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     if (!isCallActiveRef.current) return;
     setStatus('Listening');
 
-    // Automatically shift to listening to customer's voice!
+    // Smoothly start microphone for customer's response turn
     setTimeout(() => {
       startListeningAutomatically();
-    }, 400);
+    }, 500);
   }, [startListeningAutomatically]);
 
   // Dual Voice Playback Engine (Edge Neural Base64 Audio + Browser SpeechSynthesis)
@@ -271,7 +258,6 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
   // Manual Mic Toggle
   const toggleMic = () => {
     if (isMicActive) {
-      shouldListenRef.current = false;
       if (recognitionRef.current) {
         try { recognitionRef.current.stop(); } catch (e) {}
       }
@@ -320,7 +306,6 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
   // Close call modal & return to Dashboard
   const handleEndCall = () => {
     isCallActiveRef.current = false;
-    shouldListenRef.current = false;
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({ event: 'end_call' }));
       socketRef.current.close();
