@@ -139,7 +139,10 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     if (audioBase64) {
       try {
         if (audioRef.current) {
-          audioRef.current.pause();
+          try {
+            audioRef.current.pause();
+            audioRef.current.currentTime = 0;
+          } catch (e) {}
         }
         const audio = new Audio(audioBase64);
         audioRef.current = audio;
@@ -151,8 +154,8 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
                 onAISpeechEnd();
               };
             })
-            .catch((err) => {
-              console.log('Base64 audio autoplay blocked, using Web SpeechSynthesis fallback:', err);
+            .catch(() => {
+              // Silently fallback to Web Speech Synthesis if audio autoplay is blocked
               speakBrowserSpeech(text);
             });
           return;
@@ -174,9 +177,11 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
         utterance.onend = () => {
           onAISpeechEnd();
         };
+        utterance.onerror = () => {
+          onAISpeechEnd();
+        };
         window.speechSynthesis.speak(utterance);
       } catch (e) {
-        console.error('Speech synthesis error:', e);
         onAISpeechEnd();
       }
     } else {
