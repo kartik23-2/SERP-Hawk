@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
-import { Phone, PhoneOff, Mic, MicOff, Send, Bot, User, Sparkles, CheckCircle2, HelpCircle, Volume2, AlertCircle, MessageSquare, X, ArrowLeft } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Phone, PhoneOff, Mic, MicOff, Send, Bot, User, Sparkles, CheckCircle2, HelpCircle, Volume2, AlertCircle, MessageSquare, X, ArrowLeft, Radio } from 'lucide-react';
 import { Customer } from '@/types';
 
 interface LiveCallModalProps {
@@ -31,6 +31,7 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
   const [inputText, setInputText] = useState('');
   const [status, setStatus] = useState<'Connecting' | 'In Call' | 'AI Speaking' | 'Listening' | 'Completed' | 'Failed'>('Connecting');
   const [isMicActive, setIsMicActive] = useState(false);
+  const [autoMicLoop, setAutoMicLoop] = useState(true); // Hands-free continuous voice mode default ON
   const [micError, setMicError] = useState<string | null>(null);
   const [collectedSlots, setCollectedSlots] = useState<Record<string, any>>({});
   const [missingSlots, setMissingSlots] = useState<string[]>([]);
@@ -40,13 +41,101 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
   const recognitionRef = useRef<any>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
+  const isCallActiveRef = useRef(false);
+  const autoMicLoopRef = useRef(true);
+
+  useEffect(() => {
+    autoMicLoopRef.current = autoMicLoop;
+  }, [autoMicLoop]);
+
   // Scroll to bottom of chat
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Voice playback with dual fallback (Edge Neural Base64 Audio + Browser SpeechSynthesis)
-  const speakVoice = (text: string, audioBase64?: string | null) => {
+  // Automatically start microphone listening (Hands-free voice mode)
+  const startListeningAutomatically = useCallback(() => {
+    if (!isCallActiveRef.current || !autoMicLoopRef.current) return;
+
+    const isSpeechAvailable = ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
+    if (!isSpeechAvailable) return;
+
+    // Stop previous instance if active
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
+    }
+
+    try {
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      const recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = false;
+      recognition.lang = 'en-IN';
+
+      recognition.onstart = () => {
+        setIsMicActive(true);
+        setStatus('Listening');
+        setMicError(null);
+      };
+
+      recognition.onresult = (event: any) => {
+        const transcript = event.results[0][0].transcript;
+        setIsMicActive(false);
+        if (transcript && transcript.trim()) {
+          sendCustomerMessage(transcript);
+        }
+      };
+
+      recognition.onerror = (err: any) => {
+        setIsMicActive(false);
+        const errType = err.error || '';
+        if (errType === 'no-speech' || errType === 'aborted') {
+          // Restart listening automatically if call is still active & in auto mode
+          if (isCallActiveRef.current && autoMicLoopRef.current && status !== 'Completed') {
+            setTimeout(() => {
+              if (isCallActiveRef.current && autoMicLoopRef.current) {
+                startListeningAutomatically();
+              }
+            }, 600);
+          }
+        } else if (errType === 'not-allowed' || errType === 'service-not-allowed') {
+          setMicError('Microphone permission blocked. Please allow mic access in browser or use text input below.');
+        }
+      };
+
+      recognition.onend = () => {
+        setIsMicActive(false);
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (e: any) {
+      console.warn('Auto recognition start exception:', e);
+      setIsMicActive(false);
+    }
+  }, []);
+
+  // Triggered when AI finishes speaking its sentence
+  const onAISpeechEnd = useCallback(() => {
+    if (!isCallActiveRef.current) return;
+    setStatus('Listening');
+
+    // Automatically shift to listening to customer's voice!
+    if (autoMicLoopRef.current) {
+      setTimeout(() => {
+        startListeningAutomatically();
+      }, 400);
+    }
+  }, [startListeningAutomatically]);
+
+  // Dual Voice Playback Engine (Edge Neural Base64 Audio + Browser SpeechSynthesis)
+  const speakVoice = useCallback((text: string, audioBase64?: string | null) => {
+    // Stop any ongoing mic before AI speaks
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
+    }
+    setIsMicActive(false);
+
     if (audioBase64) {
       try {
         if (audioRef.current) {
@@ -59,7 +148,7 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
           playPromise
             .then(() => {
               audio.onended = () => {
-                setStatus('Listening');
+                onAISpeechEnd();
               };
             })
             .catch((err) => {
@@ -69,11 +158,11 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
           return;
         }
       } catch (e) {
-        console.log('Error creating Audio element, using fallback:', e);
+        console.log('Error playing base64 audio:', e);
       }
     }
     speakBrowserSpeech(text);
-  };
+  }, [onAISpeechEnd]);
 
   const speakBrowserSpeech = (text: string) => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -83,15 +172,15 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
         utterance.lang = 'en-IN';
         utterance.rate = 1.0;
         utterance.onend = () => {
-          setStatus('Listening');
+          onAISpeechEnd();
         };
         window.speechSynthesis.speak(utterance);
       } catch (e) {
         console.error('Speech synthesis error:', e);
-        setTimeout(() => setStatus('Listening'), 1500);
+        onAISpeechEnd();
       }
     } else {
-      setTimeout(() => setStatus('Listening'), 1500);
+      onAISpeechEnd();
     }
   };
 
@@ -103,6 +192,7 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     setStatus('Connecting');
     setCollectedSlots({});
     setMicError(null);
+    isCallActiveRef.current = true;
 
     const wsUrl = `ws://localhost:8000/ws/call/${callId}`;
     const ws = new WebSocket(wsUrl);
@@ -128,25 +218,29 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
         if (data.collected_slots) setCollectedSlots(data.collected_slots);
         if (data.missing_slots) setMissingSlots(data.missing_slots);
 
-        // Play Voice Response out loud!
-        speakVoice(data.text, data.audio_base64);
-
         if (data.is_finished) {
+          isCallActiveRef.current = false;
           setStatus('Completed');
         }
+
+        // Play AI Voice Response out loud & auto-trigger mic when done!
+        speakVoice(data.text, data.audio_base64);
       }
     };
 
     ws.onerror = (err) => {
       console.error('WebSocket error:', err);
       setStatus('Failed');
+      isCallActiveRef.current = false;
     };
 
     ws.onclose = () => {
+      isCallActiveRef.current = false;
       if (status !== 'Completed') setStatus('Completed');
     };
 
     return () => {
+      isCallActiveRef.current = false;
       if (ws.readyState === WebSocket.OPEN) {
         ws.close();
       }
@@ -160,69 +254,17 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
         try { recognitionRef.current.stop(); } catch (e) {}
       }
     };
-  }, [isOpen, callId]);
+  }, [isOpen, callId, speakVoice]);
 
-  // Robust Speech Recognition (Web Speech API)
+  // Manual Mic Toggle
   const toggleMic = () => {
-    setMicError(null);
-
-    const isSpeechAvailable = ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
-    if (!isSpeechAvailable) {
-      setMicError('Microphone Speech API is not supported in this browser. Please use text input or click quick prompts below!');
-      return;
-    }
-
     if (isMicActive) {
       if (recognitionRef.current) {
         try { recognitionRef.current.stop(); } catch (e) {}
       }
       setIsMicActive(false);
-      return;
-    }
-
-    try {
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      const recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = false;
-      recognition.lang = 'en-IN';
-
-      recognition.onstart = () => {
-        setIsMicActive(true);
-        setStatus('Listening');
-        setMicError(null);
-      };
-
-      recognition.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript;
-        if (transcript) {
-          sendCustomerMessage(transcript);
-        }
-        setIsMicActive(false);
-      };
-
-      recognition.onerror = (err: any) => {
-        setIsMicActive(false);
-        const errType = err.error || '';
-        if (errType === 'not-allowed' || errType === 'service-not-allowed') {
-          setMicError('Microphone access blocked by browser settings. Type or click quick prompts below.');
-        } else if (errType === 'no-speech' || errType === 'aborted') {
-          console.log('Speech recognition timed out.');
-        } else {
-          setMicError(`Mic note: ${errType}. Use text input or 1-click prompts below.`);
-        }
-      };
-
-      recognition.onend = () => {
-        setIsMicActive(false);
-      };
-
-      recognitionRef.current = recognition;
-      recognition.start();
-    } catch (e: any) {
-      console.warn('Recognition start exception:', e);
-      setIsMicActive(false);
-      setMicError('Could not start microphone. Use text input or quick response buttons below.');
+    } else {
+      startListeningAutomatically();
     }
   };
 
@@ -230,7 +272,7 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     const text = textToSend || inputText;
     if (!text.trim() || !socketRef.current) return;
 
-    // Append customer message to chat
+    // Append customer message to transcript
     setMessages((prev) => [
       ...prev,
       {
@@ -240,12 +282,16 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
       },
     ]);
 
-    // Stop ongoing speech synthesis
+    // Stop speech synthesis & mic
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
+    }
+    setIsMicActive(false);
 
-    // Send text turn over WebSocket to FastAPI backend
+    // Send payload over WebSocket
     socketRef.current.send(
       JSON.stringify({
         event: 'user_speak',
@@ -258,8 +304,9 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     setMicError(null);
   };
 
-  // Close Call and return to Dashboard immediately
+  // Close call modal & return to Dashboard
   const handleEndCall = () => {
+    isCallActiveRef.current = false;
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({ event: 'end_call' }));
       socketRef.current.close();
@@ -267,14 +314,17 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
+    }
     setStatus('Completed');
     if (onCallEnded) onCallEnded();
-    onClose(); // Instantly close modal and return to dashboard
+    onClose();
   };
 
   if (!isOpen || !customer) return null;
 
-  // Sample quick customer responses for 1-click voice interaction
+  // Sample quick customer responses for 1-click voice trigger
   const quickPrompts = [
     `I am looking for a 500 LPH RO system for my hotel in Bangalore.`,
     `Our budget is around ₹1,00,000 and installation is needed within 1 month.`,
@@ -324,6 +374,20 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
           </div>
 
           <div className="flex items-center space-x-2 sm:space-x-3">
+            {/* Auto-Mic Loop Toggle Indicator */}
+            <button
+              onClick={() => setAutoMicLoop(!autoMicLoop)}
+              className={`px-2.5 py-1 rounded-full text-[11px] font-semibold flex items-center gap-1 transition-all ${
+                autoMicLoop
+                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                  : 'bg-slate-800 text-slate-400 border border-slate-700'
+              }`}
+              title="Toggle Hands-Free Continuous Voice Loop"
+            >
+              <Radio className={`w-3 h-3 ${autoMicLoop ? 'animate-pulse text-emerald-400' : ''}`} />
+              <span>Auto-Voice: {autoMicLoop ? 'ON' : 'OFF'}</span>
+            </button>
+
             {/* Status Pill */}
             <div className={`px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5 ${
               status === 'AI Speaking'
@@ -421,10 +485,10 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
             </div>
 
             <div className="pt-3 border-t border-slate-800/80">
-              <h5 className="text-[11px] font-semibold text-slate-400 mb-1">Call Engine</h5>
+              <h5 className="text-[11px] font-semibold text-slate-400 mb-1">Hands-Free Voice Loop</h5>
               <p className="text-[11px] text-slate-400 leading-relaxed bg-slate-900/90 p-2.5 rounded-xl border border-slate-800">
                 Mode: <span className="text-cyan-400 font-semibold uppercase">{callMode}</span>. 
-                Using Microsoft Edge Neural Voice (<span className="text-indigo-400">en-IN-Prabhat</span>) + Web Speech fallback & Google Gemini 2.5 Flash.
+                When AI finishes speaking, microphone <span className="text-emerald-400 font-semibold">automatically opens</span> for continuous hands-free voice conversation.
               </p>
             </div>
           </div>
@@ -509,19 +573,19 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
             <div className="p-3 bg-slate-950 border-t border-slate-800 flex items-center space-x-2">
               <button
                 onClick={toggleMic}
-                title={isMicActive ? 'Stop Listening' : 'Speak into Microphone'}
+                title={isMicActive ? 'Mic Active (Listening...)' : 'Start Microphone Listening'}
                 className={`p-3 rounded-xl transition-all ${
                   isMicActive
-                    ? 'bg-rose-500 text-white animate-pulse shadow-lg shadow-rose-500/40'
+                    ? 'bg-emerald-500 text-white animate-pulse shadow-lg shadow-emerald-500/40'
                     : 'bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700'
                 }`}
               >
-                {isMicActive ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5 text-cyan-400" />}
+                {isMicActive ? <Mic className="w-5 h-5 text-white animate-bounce" /> : <Mic className="w-5 h-5 text-cyan-400" />}
               </button>
 
               <input
                 type="text"
-                placeholder={isMicActive ? 'Listening to speech...' : 'Type customer response (e.g. "500 LPH RO for my hotel in Bangalore")...'}
+                placeholder={isMicActive ? 'Listening to your voice...' : 'Type customer response (e.g. "500 LPH RO for my hotel in Bangalore")...'}
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && sendCustomerMessage()}
