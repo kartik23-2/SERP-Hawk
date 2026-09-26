@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Phone, PhoneOff, Mic, MicOff, Send, Bot, User, Sparkles, CheckCircle2, HelpCircle, Volume2, AlertCircle } from 'lucide-react';
+import { Phone, PhoneOff, Mic, MicOff, Send, Bot, User, Sparkles, CheckCircle2, HelpCircle, Volume2, AlertCircle, MessageSquare } from 'lucide-react';
 import { Customer } from '@/types';
 
 interface LiveCallModalProps {
@@ -31,6 +31,7 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
   const [inputText, setInputText] = useState('');
   const [status, setStatus] = useState<'Connecting' | 'In Call' | 'AI Speaking' | 'Listening' | 'Completed' | 'Failed'>('Connecting');
   const [isMicActive, setIsMicActive] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
   const [collectedSlots, setCollectedSlots] = useState<Record<string, any>>({});
   const [missingSlots, setMissingSlots] = useState<string[]>([]);
   
@@ -51,6 +52,7 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
     setMessages([]);
     setStatus('Connecting');
     setCollectedSlots({});
+    setMicError(null);
 
     const wsUrl = `ws://localhost:8000/ws/call/${callId}`;
     const ws = new WebSocket(wsUrl);
@@ -115,20 +117,31 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
       if (audioRef.current) {
         audioRef.current.pause();
       }
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch (e) {}
+      }
     };
   }, [isOpen, callId]);
 
-  // Initialize Speech Recognition (Web Speech API)
+  // Robust Speech Recognition (Web Speech API)
   const toggleMic = () => {
-    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-      alert('Speech Recognition is not supported in this browser. You can type customer responses directly in the text input below!');
+    setMicError(null);
+
+    const isSpeechAvailable = ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
+    if (!isSpeechAvailable) {
+      setMicError('Speech recognition is not supported in this browser. Please type or click sample prompts below!');
       return;
     }
 
     if (isMicActive) {
-      if (recognitionRef.current) recognitionRef.current.stop();
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch (e) {}
+      }
       setIsMicActive(false);
-    } else {
+      return;
+    }
+
+    try {
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
       const recognition = new SpeechRecognition();
       recognition.continuous = false;
@@ -138,21 +151,27 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
       recognition.onstart = () => {
         setIsMicActive(true);
         setStatus('Listening');
+        setMicError(null);
       };
 
       recognition.onresult = (event: any) => {
         const transcript = event.results[0][0].transcript;
-        sendCustomerMessage(transcript);
+        if (transcript) {
+          sendCustomerMessage(transcript);
+        }
         setIsMicActive(false);
       };
 
       recognition.onerror = (err: any) => {
-        console.error('Speech recognition error:', err);
         setIsMicActive(false);
-        if (err.error === 'no-speech') {
-          console.log('No speech was detected. Click microphone to speak or type in the text box below.');
-        } else if (err.error === 'not-allowed') {
-          alert('Microphone access was denied. Please allow microphone permissions in your browser settings or type customer responses in the text box!');
+        const errType = err.error || '';
+        if (errType === 'not-allowed' || errType === 'service-not-allowed') {
+          setMicError('Microphone permission blocked. Please allow mic access or use text input / sample prompts below.');
+        } else if (errType === 'no-speech' || errType === 'aborted') {
+          // Benign error: user didn't speak before timeout
+          console.log('Speech recognition timed out or stopped.');
+        } else {
+          setMicError(`Speech input note: ${errType || 'Interrupted'}. You can type or click quick responses below.`);
         }
       };
 
@@ -162,6 +181,10 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
 
       recognitionRef.current = recognition;
       recognition.start();
+    } catch (e: any) {
+      console.warn('Recognition start exception:', e);
+      setIsMicActive(false);
+      setMicError('Could not start microphone. You can type customer responses directly below.');
     }
   };
 
@@ -189,6 +212,7 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
 
     setInputText('');
     setStatus('In Call');
+    setMicError(null);
   };
 
   const handleEndCall = () => {
@@ -201,6 +225,14 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
   };
 
   if (!isOpen || !customer) return null;
+
+  // Sample quick customer responses for easy 1-click testing
+  const quickPrompts = [
+    `I am looking for a 500 LPH RO system for my hotel in Bangalore.`,
+    `Our budget is around ₹1,00,000 and installation is needed within 1 month.`,
+    `It is primarily for kitchen and guest drinking water.`,
+    `Could you send a technical quotation?`,
+  ];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-lg animate-fadeIn">
@@ -378,6 +410,33 @@ export const LiveCallModal: React.FC<LiveCallModalProps> = ({
               )}
               <div ref={chatBottomRef} />
             </div>
+
+            {/* Quick Customer Voice Response Prompts */}
+            <div className="px-3 py-2 bg-slate-950/90 border-t border-slate-800/80">
+              <p className="text-[10px] font-semibold text-slate-400 mb-1.5 flex items-center gap-1">
+                <MessageSquare className="w-3 h-3 text-cyan-400" /> Quick Customer Responses (1-Click Voice Trigger):
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {quickPrompts.map((prompt, pIdx) => (
+                  <button
+                    key={pIdx}
+                    onClick={() => sendCustomerMessage(prompt)}
+                    disabled={status === 'Completed'}
+                    className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-cyan-950/60 border border-slate-800 hover:border-cyan-500/40 text-[11px] text-slate-300 hover:text-cyan-300 transition-all text-left truncate max-w-xs disabled:opacity-40"
+                  >
+                    "{prompt}"
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Mic Error Notice */}
+            {micError && (
+              <div className="px-3 py-1.5 bg-amber-500/10 border-t border-amber-500/20 text-amber-300 text-[11px] flex items-center gap-1.5">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+                <span>{micError}</span>
+              </div>
+            )}
 
             {/* Customer Speech Input Controls */}
             <div className="p-3 bg-slate-950 border-t border-slate-800 flex items-center space-x-2">
